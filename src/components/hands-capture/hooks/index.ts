@@ -197,7 +197,14 @@ function useGestureRecognition({videoElement, canvasEl, onResultsCallback}: IHan
               activeIdx = speeds[0] >= (speeds[1]||0) ? 0 : 1;
               prevHandsPos.current = r.multiHandLandmarks.map(lm => ({ x: lm[0].x, y: lm[0].y }));
             }
-            if (onResultsCallback) onResultsCallback({ ...r, multiHandLandmarks: [r.multiHandLandmarks[activeIdx]], multiHandedness: [r.multiHandedness[activeIdx]] });
+            if (onResultsCallback) {
+              onResultsCallback({
+                ...r,
+                multiHandLandmarks: [r.multiHandLandmarks[activeIdx]],
+                multiHandedness: [r.multiHandedness[activeIdx]],
+                latestFaceResults: latestFaceResults.current
+              });
+            }
             heatmapBuffer.current.push({ x: r.multiHandLandmarks[activeIdx][9].x, y: r.multiHandLandmarks[activeIdx][9].y });
             if (heatmapBuffer.current.length > 300) heatmapBuffer.current.shift();
           }

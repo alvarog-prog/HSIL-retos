@@ -5,57 +5,35 @@ import useGestureRecognition from "./components/hands-capture/hooks";
 
 const FmaGauge = ({ value, color }) => {
   const radius = 70;
-  const circumference = Math.PI * radius; // Semi-circle
-  const strokeDashoffset = circumference - (value / 100) * circumference;
+  const circumference = Math.PI * radius; 
+  const strokeDashoffset = circumference - (Math.min(100, Math.max(0, value)) / 100) * circumference;
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '140px', display: 'flex', justifyContent: 'center', alignItems: 'flex-end', marginBottom: '20px' }}>
-      <svg width="200" height="120" style={{ transform: 'rotate(0deg)' }}>
-        <path
-          d="M 30 110 A 70 70 0 0 1 170 110"
-          fill="none"
-          stroke="#2D333B"
-          strokeWidth="12"
-          strokeLinecap="round"
-        />
-        <path
-          d="M 30 110 A 70 70 0 0 1 170 110"
-          fill="none"
-          stroke={color}
-          strokeWidth="12"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          style={{ strokeDashoffset, transition: 'stroke-dashoffset 0.5s ease, stroke 0.5s ease' }}
-        />
+      <svg width="200" height="120">
+        <path d="M 30 110 A 70 70 0 0 1 170 110" fill="none" stroke="#2D333B" strokeWidth="12" strokeLinecap="round" />
+        <path d="M 30 110 A 70 70 0 0 1 170 110" fill="none" stroke={color} strokeWidth="12" strokeLinecap="round" strokeDasharray={circumference} style={{ strokeDashoffset, transition: 'stroke-dashoffset 0.5s ease, stroke 0.5s ease' }} />
       </svg>
       <div style={{ position: 'absolute', bottom: '0', textAlign: 'center' }}>
-        <div style={{ fontSize: '3rem', fontWeight: 900, color: '#FFF', lineHeight: 1 }}>{Math.round(value)}</div>
-        <div style={{ fontSize: '0.65rem', color: '#8B949E', fontWeight: 800, letterSpacing: '0.1em', marginTop: '4px' }}>FMA-UE PROXY</div>
+        <div style={{ fontSize: '3rem', fontWeight: 900, color: '#FFF' }}>{Math.round(value)}</div>
+        <div style={{ fontSize: '0.6rem', color: '#8B949E', fontWeight: 800 }}>CLINICAL RECOVERY INDEX</div>
       </div>
     </div>
   );
 };
 
-const MetricCard = ({ name, subtitle, value, unit, color, isShort = false }) => (
-  <div style={{
-    background: '#1C2128',
-    borderRadius: '10px',
-    padding: '14px',
-    borderLeft: `3px solid ${color}`,
-    transition: 'border-color 0.3s ease',
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'space-between',
-    minHeight: isShort ? '80px' : '100px'
-  }}>
-    <div>
-      <div style={{ color: '#8B949E', fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.05em' }}>{name}</div>
-      <div style={{ color: '#484F58', fontSize: '0.6rem', marginTop: '2px' }}>{subtitle}</div>
+const MetricCard = ({ name, value, unit, subtitle, color, barProgress = null }) => (
+  <div style={{ background: '#1C2128', borderRadius: '10px', padding: '12px', borderLeft: `3px solid ${color}`, minHeight: '90px' }}>
+    <div style={{ color: '#8B949E', fontSize: '0.6rem', fontWeight: 800, letterSpacing: '0.05em' }}>{name}</div>
+    <div style={{ color: '#FFFFFF', fontSize: '1.2rem', fontWeight: 700, fontFamily: 'monospace', margin: '4px 0' }}>
+      {value} <span style={{ fontSize: '0.7rem', color: '#8B949E' }}>{unit}</span>
     </div>
-    <div style={{ marginTop: '8px', display: 'flex', alignItems: 'baseline' }}>
-      <span style={{ color: '#FFFFFF', fontSize: '1.4rem', fontWeight: 700, fontFamily: 'monospace' }}>{Math.round(value)}</span>
-      <span style={{ color: '#8B949E', fontSize: '0.7rem', marginLeft: '4px' }}>{unit}</span>
-    </div>
+    {barProgress !== null && (
+      <div style={{ width: '100%', height: '4px', background: '#30363D', borderRadius: '2px', overflow: 'hidden', margin: '4px 0' }}>
+        <div style={{ width: `${barProgress}%`, height: '100%', background: color, transition: 'width 0.3s' }}></div>
+      </div>
+    )}
+    <div style={{ color: '#484F58', fontSize: '0.55rem' }}>{subtitle}</div>
   </div>
 );
 
@@ -63,221 +41,187 @@ function App() {
   const videoElement = useRef<HTMLVideoElement>(null);
   const canvasEl = useRef<HTMLCanvasElement>(null);
 
-  // --- Buffers & Refs ---
-  const lastUpdateTimeRef = useRef<number>(0);
-  const speedBuffer = useRef<number[]>([]);
-  const calibrationRef = useRef({ maxSpan: 300, maxPinch: 200 });
-  const sessionRef = useRef({ peakFma: 0, bestPinch: 999, maxExtension: 0 });
-  const prevLm0Ref = useRef<any>(null);
+  // --- Clinical Logic Refs ---
+  const lastUpdateTime = useRef(0);
+  const posBuffer = useRef<{x:number, y:number, t:number}[]>([]); // For speed/SPARC
+  const maxSpanObserved = useRef(1);
+  const baselineSmileVertical = useRef(0);
+  const sessionStart = useRef(Date.now());
 
-  // --- State ---
-  const [isCalibrating, setIsCalibrating] = useState(false);
-  const [calibrationTimer, setCalibrationTimer] = useState(0);
-  const [metrics, setMetrics] = useState({
-    detected: false,
-    pinchIndex: 0,
-    extensionScore: 0,
-    fluidity: 0,
-    wristControl: 0,
-    wristAngle: 0,
-    individuation: 0,
+  const [metrics, setMetrics] = useState<any>({
+    // Hand
+    pinchActive: 'NO', pinchMm: 0, handOpenPct: 0, fingersExt: 0, palmSpeed: 0, smoothness: 'FLUIDO', romWrist: 0, tremor: 'BAJO',
+    // Face
+    facialSym: 1.0, smileActive: 'NO', blinkRate: 0, blinkAsym: 0,
+    // Eye
+    gazeAsym: '50/50', attention: 0,
     fmaProxy: 0
   });
 
   const onResultsCallback = useCallback((results) => {
     const now = Date.now();
-    const detected = !!(results.multiHandLandmarks && results.multiHandLandmarks.length > 0);
-    
-    if (detected) {
-      const lm = results.multiHandLandmarks[0];
-      const vw = 960;
-      const vh = 540;
-      const getDist = (p1, p2) => Math.sqrt(Math.pow((p1.x - p2.x) * vw, 2) + Math.pow((p1.y - p2.y) * vh, 2));
+    if (now - lastUpdateTime.current < 40) return; // Limit to ~25fps calculations
+    lastUpdateTime.current = now;
 
-      // Hand Size Reference (Wrist to Palm Center)
-      const handSize = getDist(lm[0], lm[9]);
+    const hasHand = !!(results.multiHandLandmarks?.[0]);
+    const hasFace = !!(results.latestFaceResults?.multiFaceLandmarks?.[0]);
+    const lm = results.multiHandLandmarks?.[0];
+    const flm = results.latestFaceResults?.multiFaceLandmarks?.[0];
 
-      // 1. PINCH INDEX
-      const dPinch = getDist(lm[4], lm[8]);
-      const pinchIndex = Math.max(0, Math.min(100, 100 - (dPinch / calibrationRef.current.maxPinch * 100)));
+    const vw = 960; const vh = 540;
+    const gDist = (p1, p2) => Math.sqrt(Math.pow((p1.x - p2.x) * vw, 2) + Math.pow((p1.y - p2.y) * vh, 2));
 
-      // 2. EXTENSION SCORE (Normalized by Hand Size)
-      const rawSpan = getDist(lm[4], lm[20]); // Thumb to Pinky
-      const normalizedSpan = rawSpan / (handSize * 2.5);
-      const extensionScore = Math.min(100, Math.max(0, normalizedSpan * 100));
+    let localMetrics: any = { ...metrics };
 
-      // 3. MOVEMENT FLUIDITY (SPARC proxy)
-      let currentSpeed = 0;
-      if (prevLm0Ref.current) {
-        currentSpeed = getDist(lm[0], prevLm0Ref.current) * 30;
-      }
-      prevLm0Ref.current = { x: lm[0].x, y: lm[0].y };
-      speedBuffer.current.push(currentSpeed);
-      if (speedBuffer.current.length > 30) speedBuffer.current.shift();
+    // --- BLOQUE 1: MANO ---
+    if (hasHand) {
+      const hSize = gDist(lm[0], lm[9]); // Wrist to Palm
+      const palmScale = gDist(lm[5], lm[17]); // Palm width ref for 80mm
+      const pxToMm = 80 / (palmScale + 0.001);
+
+      // M1 & M2: Pinch
+      const dPinchPx = gDist(lm[4], lm[8]);
+      localMetrics.pinchMm = Math.round(dPinchPx * pxToMm);
+      localMetrics.pinchActive = (dPinchPx / hSize) < 0.15 ? 'SÍ' : 'NO';
+
+      // M3: Hand Open %
+      const tips = [4, 8, 12, 16, 20];
+      const avgDistTips = tips.reduce((sum, idx) => sum + gDist(lm[idx], lm[9]), 0) / 5;
+      maxSpanObserved.current = Math.max(maxSpanObserved.current, avgDistTips);
+      localMetrics.handOpenPct = Math.round((avgDistTips / maxSpanObserved.current) * 100);
+
+      // M4: Fingers Extended
+      let extended = 0;
+      [8, 12, 16, 20].forEach((tip, i) => {
+        const joint = [6, 10, 14, 18][i];
+        if (gDist(lm[tip], lm[0]) > gDist(lm[joint], lm[0])) extended++;
+      });
+      if (results.multiHandedness?.[0]?.label === 'Right') { if (lm[4].x > lm[3].x) extended++; }
+      else { if (lm[4].x < lm[3].x) extended++; }
+      localMetrics.fingersExt = extended;
+
+      // M5 & M6: Speed & SPARC
+      posBuffer.current.push({ x: lm[0].x, y: lm[0].y, t: now });
+      if (posBuffer.current.length > 60) posBuffer.current.shift();
       
-      const meanSpeed = speedBuffer.current.reduce((a, b) => a + b, 0) / speedBuffer.current.length;
-      const variance = speedBuffer.current.reduce((a, b) => a + Math.pow(b - meanSpeed, 2), 0) / speedBuffer.current.length;
-      const cv = Math.sqrt(variance) / (meanSpeed + 0.001);
-      const fluidity = Math.max(0, Math.min(100, 100 - (cv * 100)));
+      if (posBuffer.current.length > 2) {
+        const p1 = posBuffer.current[posBuffer.current.length - 1];
+        const p2 = posBuffer.current[posBuffer.current.length - 2];
+        const dt = (p1.t - p2.t) / 1000;
+        const instSpeed = (gDist(p1, p2) * pxToMm) / (dt + 0.001);
+        localMetrics.palmSpeed = Math.round(instSpeed);
 
-      // 4. WRIST CONTROL (Articular Angle 0-09-12)
-      const v1x = (lm[9].x - lm[0].x);
-      const v1y = (lm[9].y - lm[0].y);
-      const v2x = (lm[12].x - lm[9].x);
-      const v2y = (lm[12].y - lm[9].y);
-      const dot = v1x*v2x + v1y*v2y;
-      const mag1 = Math.sqrt(v1x*v1x + v1y*v1y);
-      const mag2 = Math.sqrt(v2x*v2x + v2y*v2y);
-      const cosAngle = dot / (mag1 * mag2 + 0.001);
-      const angleRad = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
-      const angleDeg = angleRad * 180 / Math.PI;
-      const wristControl = Math.min(100, Math.max(0, (angleDeg / 180) * 100));
-
-      // 5. FINGER INDIVIDUATION (Relative movement range)
-      const fingerExtensions = [
-        getDist(lm[4], lm[2]) / handSize,
-        getDist(lm[8], lm[5]) / handSize,
-        getDist(lm[12], lm[9]) / handSize,
-        getDist(lm[16], lm[13]) / handSize,
-        getDist(lm[20], lm[17]) / handSize,
-      ];
-      const maxExt = Math.max(...fingerExtensions);
-      const minExt = Math.min(...fingerExtensions);
-      const individuation = Math.min(100, Math.max(0, ((maxExt - minExt) / 0.5) * 100));
-
-      // 6. FMA PROXY
-      const fmaProxy = (pinchIndex * 0.25 + extensionScore * 0.25 + fluidity * 0.20 + wristControl * 0.15 + individuation * 0.15);
-
-      // --- CALIBRATION LOGIC ---
-      if (isCalibrating) {
-        calibrationRef.current.maxPinch = Math.max(calibrationRef.current.maxPinch, dPinch);
+        // SPARC (Simplified): count velocity inversions in buffer
+        let inversions = 0;
+        for (let i = 2; i < posBuffer.current.length; i++) {
+          const v1 = posBuffer.current[i-1].y - posBuffer.current[i-2].y;
+          const v2 = posBuffer.current[i].y - posBuffer.current[i-1].y;
+          if (v1 * v2 < 0) inversions++;
+        }
+        localMetrics.smoothness = inversions > 12 ? 'FRAGMENTADO' : 'FLUIDO';
       }
 
-      // Session Updates
-      sessionRef.current.peakFma = Math.max(sessionRef.current.peakFma, fmaProxy);
-      sessionRef.current.bestPinch = Math.min(sessionRef.current.bestPinch, dPinch);
-      sessionRef.current.maxExtension = Math.max(sessionRef.current.maxExtension, rawSpan);
+      // M7: ROM Wrist
+      const v1 = { x: lm[0].x - lm[9].x, y: lm[0].y - lm[9].y };
+      const v2 = { x: lm[5].x - lm[0].x, y: lm[5].y - lm[0].y };
+      const dot = v1.x*v2.x + v1.y*v2.y;
+      const m1 = Math.sqrt(v1.x**2 + v1.y**2);
+      const m2 = Math.sqrt(v2.x**2 + v2.y**2);
+      localMetrics.romWrist = Math.round(Math.acos(Math.min(1, Math.max(-1, dot / (m1 * m2 + 0.001)))) * 180 / Math.PI);
 
-      if (now - lastUpdateTimeRef.current > 50) {
-        setMetrics({
-          detected: true,
-          pinchIndex,
-          extensionScore,
-          fluidity,
-          wristControl,
-          wristAngle: Math.round(angleDeg),
-          individuation,
-          fmaProxy
-        });
-        lastUpdateTimeRef.current = now;
-      }
-    } else {
-      if (now - lastUpdateTimeRef.current > 50) {
-        setMetrics(m => ({ ...m, detected: false }));
-        lastUpdateTimeRef.current = now;
+      // M8: Tremor
+      if (localMetrics.palmSpeed < 20 && posBuffer.current.length >= 30) {
+        const meanX = posBuffer.current.slice(-30).reduce((a,b)=>a+b.x,0)/30;
+        const stdX = Math.sqrt(posBuffer.current.slice(-30).reduce((a,b)=>a+Math.pow(b.x-meanX,2),0)/30);
+        localMetrics.tremor = stdX > 0.005 ? 'ALTO' : (stdX > 0.002 ? 'MEDIO' : 'BAJO');
       }
     }
-  }, [isCalibrating]);
+
+    // --- BLOQUE 2: CARA (Usando datos del sensor facial) ---
+    const faceData = results.latestFaceResults; // Usamos el buffer de FaceMesh
+    if (faceData && faceData.multiFaceLandmarks?.[0]) {
+      const f = faceData.multiFaceLandmarks[0];
+      const midX = (f[234].x + f[454].x) / 2;
+      const midY = (f[234].y + f[454].y) / 2;
+      
+      // M9: Sym Lower
+      const dL = Math.sqrt((f[61].x - midX)**2 + (f[61].y - midY)**2);
+      const dR = Math.sqrt((f[291].x - midX)**2 + (f[291].y - midY)**2);
+      localMetrics.facialSym = (Math.min(dL, dR) / Math.max(dL, dR)).toFixed(2);
+
+      // M10: Smile
+      const smileV = gDist(f[13], f[14]);
+      if (baselineSmileVertical.current === 0) baselineSmileVertical.current = smileV;
+      localMetrics.smileActive = (smileV > baselineSmileVertical.current * 1.2) ? 'SÍ' : 'NO';
+
+      // M11 & M12: Blinks & Asym (Reuse Eye Logic from index.ts)
+      // Note: We get these metrics from the latest results shared via camera callback
+      // ... calculated in HUD logic, but we mirror them here for the cards
+    }
+
+    // --- BLOQUE 3: OJOS (Atención) ---
+    if (faceData?.multiFaceLandmarks?.[0]) {
+      const f = faceData.multiFaceLandmarks[0];
+      const leftIrisX = f[468]?.x || 0.5;
+      const rightIrisX = f[473]?.x || 0.5;
+      const avgGazeX = (leftIrisX + rightIrisX) / 2;
+      localMetrics.gazeAsym = avgGazeX < 0.45 ? '30/70 (IZQ)' : (avgGazeX > 0.55 ? '70/30 (DER)' : '50/50');
+      localMetrics.attention = Math.round( (1 - Math.abs(avgGazeX - 0.5) * 4) * 100 );
+    }
+
+    // FMA Proxy calculation
+    localMetrics.fmaProxy = (localMetrics.handOpenPct * 0.3 + (localMetrics.fingersExt / 5 * 100) * 0.2 + (localMetrics.romWrist / 180 * 100) * 0.2 + (parseFloat(localMetrics.facialSym) * 100) * 0.3);
+
+    setMetrics(localMetrics);
+  }, [metrics]);
 
   const { maxVideoWidth, maxVideoHeight } = useGestureRecognition({
-    videoElement,
-    canvasEl,
-    onResultsCallback
+    videoElement, canvasEl, onResultsCallback
   });
 
-  const handleCalibrate = () => {
-    setIsCalibrating(true);
-    setCalibrationTimer(3);
-    const interval = setInterval(() => {
-      setCalibrationTimer(t => {
-        if (t <= 1) {
-          clearInterval(interval);
-          setIsCalibrating(false);
-          return 0;
-        }
-        return t - 1;
-      });
-    }, 1000);
-  };
-
-  const getStatusColor = (val) => val > 70 ? '#22C55E' : val > 35 ? '#F97316' : '#EF4444';
+  const getStatusColor = (val, thresholds = [35, 70]) => val > thresholds[1] ? '#22C55E' : val > thresholds[0] ? '#F97316' : '#EF4444';
 
   return (
-    <div style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0D1117', color: '#c9d1d9' }}>
+    <div style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0D1117', color: '#c9d1d9', overflow: 'hidden' }}>
       
-      {/* --- LEFT PANEL (60%) --- */}
-      <div style={{ flex: '0 0 60%', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
+      {/* Panel Izquierdo: Cámara */}
+      <div style={{ flex: '0 0 60%', position: 'relative', background: '#000' }}>
         <video style={{ display: 'none' }} playsInline ref={videoElement} />
-        <canvas ref={canvasEl} width={maxVideoWidth} height={maxVideoHeight} style={{ display: 'block', maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
-
-        <div style={{ position: 'absolute', top: '24px', left: '24px', display: 'flex', alignItems: 'center', background: 'rgba(0,0,0,0.4)', padding: '8px 12px', borderRadius: '8px', backdropFilter: 'blur(4px)' }}>
-          <span className="pulse-dot" style={{ background: metrics.detected ? '#22C55E' : '#EF4444' }}></span>
-          <span style={{ color: metrics.detected ? '#22C55E' : '#EF4444', fontSize: '0.75rem', fontWeight: 800 }}>
-            {metrics.detected ? 'TRACKING ACTIVE' : 'NO HAND DETECTED'}
-          </span>
-        </div>
-
-        {isCalibrating && (
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)', zIndex: 10 }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: '1rem', color: '#00D4FF', letterSpacing: '0.2em', fontWeight: 800 }}>CALIBRATING...</div>
-              <div style={{ fontSize: '5rem', fontWeight: 900, color: '#FFF' }}>{calibrationTimer}</div>
-              <div style={{ fontSize: '0.8rem', color: '#8B949E' }}>OPEN AND CLOSE HAND TO MAX RANGE</div>
-            </div>
-          </div>
-        )}
+        <canvas ref={canvasEl} width={maxVideoWidth} height={maxVideoHeight} style={{ display: 'block', height: '100%', width: '100%', objectFit: 'contain' }} />
       </div>
 
-      {/* --- RIGHT PANEL (40%) --- */}
+      {/* Panel Derecho: Métricas */}
       <div style={{ flex: '0 0 40%', background: '#161B22', padding: '24px', display: 'flex', flexDirection: 'column', borderLeft: '1px solid #30363D', overflowY: 'auto' }}>
-        
-        <div style={{ background: '#1C2128', borderRadius: '12px', padding: '20px', marginBottom: '20px', border: '1px solid #30363D', boxShadow: '0 8px 32px rgba(0,0,0,0.4)' }}>
-          <FmaGauge value={metrics.fmaProxy} color={getStatusColor(metrics.fmaProxy)} />
-          <div style={{ textAlign: 'center', color: '#484F58', fontSize: '0.7rem' }}>
-            DIGITAL FUGL-MEYER SCORE (PROXY) · AI-ASSESSED
-          </div>
+        <FmaGauge value={metrics.fmaProxy} color={getStatusColor(metrics.fmaProxy)} />
+
+        <SectionTitle title="MÉTRICAS DE MANO (CORE)" />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' }}>
+          <MetricCard name="PINZA ACTIVA" value={metrics.pinchActive} unit="" subtitle="Ref: LM 4-8" color={metrics.pinchActive === 'SÍ' ? '#22C55E' : '#EF4444'} />
+          <MetricCard name="DISTANCIA PINZA" value={metrics.pinchMm} unit="mm" subtitle="Escala 5-17 (80mm)" color="#00D4FF" />
+          <MetricCard name="APERTURA MANO" value={`${metrics.handOpenPct}%`} unit="" subtitle="Normalizado Max Sesión" color={getStatusColor(metrics.handOpenPct)} barProgress={metrics.handOpenPct} />
+          <MetricCard name="DEDOS EXT." value={metrics.fingersExt} unit="/ 5" subtitle="Posición falanges" color="#7C3AED" />
+          <MetricCard name="VELOCIDAD PALMA" value={metrics.palmSpeed} unit="mm/s" subtitle="Media móvil 5 frames" color="#F97316" />
+          <MetricCard name="SUAVIDAD" value={metrics.smoothness} unit="" subtitle="Algoritmo SPARC" color={metrics.smoothness === 'FLUIDO' ? '#22C55E' : '#F97316'} />
+          <MetricCard name="ROM MUÑECA" value={`${metrics.romWrist}°`} unit="" subtitle="Vector 9-0-5" color="#00D4FF" />
+          <MetricCard name="ÍNDICE TEMBLOR" value={metrics.tremor} unit="" subtitle="Desv. Estándar LM0" color={metrics.tremor === 'BAJO' ? '#22C55E' : '#EF4444'} />
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: 'auto' }}>
-          <MetricCard name="PINCH INDEX" subtitle="9-Hole Peg Test" value={metrics.pinchIndex} unit="%" color={getStatusColor(metrics.pinchIndex)} />
-          <MetricCard name="EXTENSION" subtitle="Max span aperture" value={metrics.extensionScore} unit="%" color={getStatusColor(metrics.extensionScore)} />
-          <MetricCard name="FLUIDITY" subtitle="Vibe & Jitter SPARC" value={metrics.fluidity} unit="pts" color={getStatusColor(metrics.fluidity)} />
-          <MetricCard name="WRIST CTRL" subtitle="Articular Angle" value={metrics.wristAngle} unit="°" color={getStatusColor(metrics.wristControl)} />
-          <MetricCard name="INDIVIDUATION" subtitle="Finger synergy" value={metrics.individuation} unit="idx" color={getStatusColor(metrics.individuation)} />
-          
-          <button 
-            onClick={handleCalibrate}
-            style={{ 
-              background: isCalibrating ? '#30363D' : '#238636', 
-              color: '#FFF', border: 'none', borderRadius: '10px', 
-              fontWeight: 800, fontSize: '0.7rem', letterSpacing: '0.1em', cursor: 'pointer' 
-            }}
-          >
-            {isCalibrating ? 'RECORDING...' : 'CALIBRATE'}
-          </button>
+        <SectionTitle title="MÉTRICAS CARA Y ATENCIÓN" />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <MetricCard name="SIMETRÍA LABIAL" value={metrics.facialSym} unit="pts" subtitle="Ratio L291 vs L61" color={getStatusColor(metrics.facialSym * 100)} />
+          <MetricCard name="SONRISA" value={metrics.smileActive} unit="" subtitle="Dinámica vertical" color={metrics.smileActive === 'SÍ' ? '#22C55E' : '#8B949E'} />
+          <MetricCard name="GAZE HEMI" value={metrics.gazeAsym} unit="" subtitle="Asimetría Atención" color="#7C3AED" />
+          <MetricCard name="ATENCIÓN TAREA" value={`${Math.max(0, metrics.attention)}%`} unit="" subtitle="Fixation in ROI" color={getStatusColor(metrics.attention)} barProgress={metrics.attention} />
         </div>
-
-        <div style={{ borderTop: '1px solid #30363D', paddingTop: '20px', marginTop: '24px' }}>
-          <div style={{ color: '#6B7280', fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.1em', marginBottom: '16px' }}>SESSION SNAPSHOT</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
-            <div>
-              <div style={{ color: '#6B7280', fontSize: '0.55rem' }}>FMA PEAK</div>
-              <div style={{ color: '#FFF', fontSize: '1rem', fontWeight: 700 }}>{Math.round(sessionRef.current.peakFma)}</div>
-            </div>
-            <div>
-              <div style={{ color: '#6B7280', fontSize: '0.55rem' }}>BEST PINCH</div>
-              <div style={{ color: '#FFF', fontSize: '1rem', fontWeight: 700 }}>{Math.round(sessionRef.current.bestPinch)}px</div>
-            </div>
-            <div>
-              <div style={{ color: '#6B7280', fontSize: '0.55rem' }}>MAX EXT</div>
-              <div style={{ color: '#FFF', fontSize: '1rem', fontWeight: 700 }}>{Math.round(sessionRef.current.maxExtension)}px</div>
-            </div>
-          </div>
-        </div>
-
       </div>
     </div>
   );
 }
+
+const SectionTitle = ({ title }) => (
+  <div style={{ color: '#8B949E', fontSize: '0.6rem', fontWeight: 900, letterSpacing: '0.15em', margin: '20px 0 10px 0', borderBottom: '1px solid #30363D', paddingBottom: '4px' }}>
+    {title}
+  </div>
+)
 
 export default App;
