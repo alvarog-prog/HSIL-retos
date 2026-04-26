@@ -1,5 +1,8 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 import useGestureRecognition from "./components/hands-capture/hooks";
+import { GameEngineProvider, useGameSession } from "./services/game-engine";
+import GameSimulator from "./components/GameSimulator";
+import SessionBridge from "./components/SessionBridge";
 
 // --- Clinical Card Components ---
 
@@ -37,34 +40,82 @@ const MetricCard = ({ name, value, unit, subtitle, color, barProgress = null }) 
   </div>
 );
 
+// --- Main UI Content (Inside Provider) ---
+
+const AppContent = ({ metrics, rawResults, videoElement, canvasEl, maxVideoWidth, maxVideoHeight }) => {
+  const { phase, sessionMetrics, resetSession } = useGameSession();
+  const getStatusColor = (val, thresholds = [35, 70]) => val > thresholds[1] ? '#22C55E' : val > thresholds[0] ? '#F97316' : '#EF4444';
+
+  return (
+    <>
+      <div style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0D1117', color: '#c9d1d9', overflow: 'hidden' }}>
+        
+        {/* Panel Izquierdo: Cámara */}
+        <div style={{ flex: '0 0 60%', position: 'relative', background: '#000' }}>
+          <GameSimulator />
+          <video style={{ display: 'none' }} playsInline ref={videoElement} />
+          <canvas ref={canvasEl} width={maxVideoWidth} height={maxVideoHeight} style={{ display: 'block', height: '100%', width: '100%', objectFit: 'contain' }} />
+        </div>
+
+        {/* Panel Derecho: Métricas */}
+        <div style={{ flex: '0 0 40%', background: '#161B22', padding: '24px', display: 'flex', flexDirection: 'column', borderLeft: '1px solid #30363D', overflowY: 'auto' }}>
+          <FmaGauge value={metrics.fmaProxy} color={getStatusColor(metrics.fmaProxy)} />
+
+          <SectionTitle title="MÉTRICAS DE MANO (CORE)" />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' }}>
+            <MetricCard name="PINZA ACTIVA" value={metrics.pinchActive} unit="" subtitle="Ref: LM 4-8" color={metrics.pinchActive === 'SÍ' ? '#22C55E' : '#EF4444'} />
+            <MetricCard name="DISTANCIA PINZA" value={metrics.pinchMm} unit="mm" subtitle="Escala 5-17 (80mm)" color="#00D4FF" />
+            <MetricCard name="APERTURA MANO" value={`${metrics.handOpenPct}%`} unit="" subtitle="Normalizado Max Sesión" color={getStatusColor(metrics.handOpenPct)} barProgress={metrics.handOpenPct} />
+            <MetricCard name="DEDOS EXT." value={metrics.fingersExt} unit="/ 5" subtitle="Posición falanges" color="#7C3AED" />
+            <MetricCard name="VELOCIDAD PALMA" value={metrics.palmSpeed} unit="mm/s" subtitle="Media móvil 5 frames" color="#F97316" />
+            <MetricCard name="SUAVIDAD" value={metrics.smoothness} unit="" subtitle="Algoritmo SPARC" color={metrics.smoothness === 'FLUIDO' ? '#22C55E' : '#F97316'} />
+            <MetricCard name="ROM MUÑECA" value={`${metrics.romWrist}°`} unit="" subtitle="Vector 9-0-5" color="#00D4FF" />
+            <MetricCard name="ÍNDICE TEMBLOR" value={metrics.tremor} unit="" subtitle="Desv. Estándar LM0" color={metrics.tremor === 'BAJO' ? '#22C55E' : '#EF4444'} />
+          </div>
+
+          <SectionTitle title="MÉTRICAS CARA Y ATENCIÓN" />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <MetricCard name="SIMETRÍA LABIAL" value={metrics.facialSym} unit="pts" subtitle="Ratio L291 vs L61" color={getStatusColor(metrics.facialSym * 100)} />
+            <MetricCard name="SONRISA" value={metrics.smileActive} unit="" subtitle="Dinámica vertical" color={metrics.smileActive === 'SÍ' ? '#22C55E' : '#8B949E'} />
+            <MetricCard name="GAZE HEMI" value={metrics.gazeAsym} unit="" subtitle="Asimetría Atención" color="#7C3AED" />
+            <MetricCard name="ATENCIÓN TAREA" value={`${Math.max(0, metrics.attention)}%`} unit="" subtitle="Fixation in ROI" color={getStatusColor(metrics.attention)} barProgress={metrics.attention} />
+          </div>
+        </div>
+      </div>
+
+      {phase === 'COMPLETE' && (
+        <SessionBridge sessionData={sessionMetrics} onNewSession={resetSession} />
+      )}
+    </>
+  );
+};
+
 function App() {
   const videoElement = useRef<HTMLVideoElement>(null);
   const canvasEl = useRef<HTMLCanvasElement>(null);
 
   // --- Clinical Logic Refs ---
   const lastUpdateTime = useRef(0);
-  const posBuffer = useRef<{x:number, y:number, t:number}[]>([]); // For speed/SPARC
+  const posBuffer = useRef<{x:number, y:number, t:number}[]>([]); 
   const maxSpanObserved = useRef(1);
   const baselineSmileVertical = useRef(0);
-  const sessionStart = useRef(Date.now());
 
   const [metrics, setMetrics] = useState<any>({
-    // Hand
     pinchActive: 'NO', pinchMm: 0, handOpenPct: 0, fingersExt: 0, palmSpeed: 0, smoothness: 'FLUIDO', romWrist: 0, tremor: 'BAJO',
-    // Face
     facialSym: 1.0, smileActive: 'NO', blinkRate: 0, blinkAsym: 0,
-    // Eye
     gazeAsym: '50/50', attention: 0,
     fmaProxy: 0
   });
 
+  const [rawResults, setRawResults] = useState<any>(null);
+
   const onResultsCallback = useCallback((results) => {
+    setRawResults(results);
     const now = Date.now();
-    if (now - lastUpdateTime.current < 40) return; // Limit to ~25fps calculations
+    if (now - lastUpdateTime.current < 40) return;
     lastUpdateTime.current = now;
 
     const hasHand = !!(results.multiHandLandmarks?.[0]);
-    const hasFace = !!(results.latestFaceResults?.multiFaceLandmarks?.[0]);
     const lm = results.multiHandLandmarks?.[0];
     const flm = results.latestFaceResults?.multiFaceLandmarks?.[0];
 
@@ -73,24 +124,20 @@ function App() {
 
     let localMetrics: any = { ...metrics };
 
-    // --- BLOQUE 1: MANO ---
     if (hasHand) {
-      const hSize = gDist(lm[0], lm[9]); // Wrist to Palm
-      const palmScale = gDist(lm[5], lm[17]); // Palm width ref for 80mm
+      const hSize = gDist(lm[0], lm[9]);
+      const palmScale = gDist(lm[5], lm[17]);
       const pxToMm = 80 / (palmScale + 0.001);
 
-      // M1 & M2: Pinch
       const dPinchPx = gDist(lm[4], lm[8]);
       localMetrics.pinchMm = Math.round(dPinchPx * pxToMm);
       localMetrics.pinchActive = (dPinchPx / hSize) < 0.15 ? 'SÍ' : 'NO';
 
-      // M3: Hand Open %
       const tips = [4, 8, 12, 16, 20];
       const avgDistTips = tips.reduce((sum, idx) => sum + gDist(lm[idx], lm[9]), 0) / 5;
       maxSpanObserved.current = Math.max(maxSpanObserved.current, avgDistTips);
       localMetrics.handOpenPct = Math.round((avgDistTips / maxSpanObserved.current) * 100);
 
-      // M4: Fingers Extended
       let extended = 0;
       [8, 12, 16, 20].forEach((tip, i) => {
         const joint = [6, 10, 14, 18][i];
@@ -100,7 +147,6 @@ function App() {
       else { if (lm[4].x < lm[3].x) extended++; }
       localMetrics.fingersExt = extended;
 
-      // M5 & M6: Speed & SPARC
       posBuffer.current.push({ x: lm[0].x, y: lm[0].y, t: now });
       if (posBuffer.current.length > 60) posBuffer.current.shift();
       
@@ -111,7 +157,6 @@ function App() {
         const instSpeed = (gDist(p1, p2) * pxToMm) / (dt + 0.001);
         localMetrics.palmSpeed = Math.round(instSpeed);
 
-        // SPARC (Simplified): count velocity inversions in buffer
         let inversions = 0;
         for (let i = 2; i < posBuffer.current.length; i++) {
           const v1 = posBuffer.current[i-1].y - posBuffer.current[i-2].y;
@@ -121,7 +166,6 @@ function App() {
         localMetrics.smoothness = inversions > 12 ? 'FRAGMENTADO' : 'FLUIDO';
       }
 
-      // M7: ROM Wrist
       const v1 = { x: lm[0].x - lm[9].x, y: lm[0].y - lm[9].y };
       const v2 = { x: lm[5].x - lm[0].x, y: lm[5].y - lm[0].y };
       const dot = v1.x*v2.x + v1.y*v2.y;
@@ -129,7 +173,6 @@ function App() {
       const m2 = Math.sqrt(v2.x**2 + v2.y**2);
       localMetrics.romWrist = Math.round(Math.acos(Math.min(1, Math.max(-1, dot / (m1 * m2 + 0.001)))) * 180 / Math.PI);
 
-      // M8: Tremor
       if (localMetrics.palmSpeed < 20 && posBuffer.current.length >= 30) {
         const meanX = posBuffer.current.slice(-30).reduce((a,b)=>a+b.x,0)/30;
         const stdX = Math.sqrt(posBuffer.current.slice(-30).reduce((a,b)=>a+Math.pow(b.x-meanX,2),0)/30);
@@ -137,41 +180,23 @@ function App() {
       }
     }
 
-    // --- BLOQUE 2: CARA (Usando datos del sensor facial) ---
-    const faceData = results.latestFaceResults; // Usamos el buffer de FaceMesh
-    if (faceData && faceData.multiFaceLandmarks?.[0]) {
-      const f = faceData.multiFaceLandmarks[0];
-      const midX = (f[234].x + f[454].x) / 2;
-      const midY = (f[234].y + f[454].y) / 2;
-      
-      // M9: Sym Lower
-      const dL = Math.sqrt((f[61].x - midX)**2 + (f[61].y - midY)**2);
-      const dR = Math.sqrt((f[291].x - midX)**2 + (f[291].y - midY)**2);
+    if (flm) {
+      const midX = (flm[234].x + flm[454].x) / 2;
+      const midY = (flm[234].y + flm[454].y) / 2;
+      const dL = Math.sqrt((flm[61].x - midX)**2 + (flm[61].y - midY)**2);
+      const dR = Math.sqrt((flm[291].x - midX)**2 + (flm[291].y - midY)**2);
       localMetrics.facialSym = (Math.min(dL, dR) / Math.max(dL, dR)).toFixed(2);
-
-      // M10: Smile
-      const smileV = gDist(f[13], f[14]);
+      const smileV = gDist(flm[13], flm[14]);
       if (baselineSmileVertical.current === 0) baselineSmileVertical.current = smileV;
       localMetrics.smileActive = (smileV > baselineSmileVertical.current * 1.2) ? 'SÍ' : 'NO';
-
-      // M11 & M12: Blinks & Asym (Reuse Eye Logic from index.ts)
-      // Note: We get these metrics from the latest results shared via camera callback
-      // ... calculated in HUD logic, but we mirror them here for the cards
-    }
-
-    // --- BLOQUE 3: OJOS (Atención) ---
-    if (faceData?.multiFaceLandmarks?.[0]) {
-      const f = faceData.multiFaceLandmarks[0];
-      const leftIrisX = f[468]?.x || 0.5;
-      const rightIrisX = f[473]?.x || 0.5;
+      const leftIrisX = flm[468]?.x || 0.5;
+      const rightIrisX = flm[473]?.x || 0.5;
       const avgGazeX = (leftIrisX + rightIrisX) / 2;
       localMetrics.gazeAsym = avgGazeX < 0.45 ? '30/70 (IZQ)' : (avgGazeX > 0.55 ? '70/30 (DER)' : '50/50');
       localMetrics.attention = Math.round( (1 - Math.abs(avgGazeX - 0.5) * 4) * 100 );
     }
 
-    // FMA Proxy calculation
     localMetrics.fmaProxy = (localMetrics.handOpenPct * 0.3 + (localMetrics.fingersExt / 5 * 100) * 0.2 + (localMetrics.romWrist / 180 * 100) * 0.2 + (parseFloat(localMetrics.facialSym) * 100) * 0.3);
-
     setMetrics(localMetrics);
   }, [metrics]);
 
@@ -179,42 +204,17 @@ function App() {
     videoElement, canvasEl, onResultsCallback
   });
 
-  const getStatusColor = (val, thresholds = [35, 70]) => val > thresholds[1] ? '#22C55E' : val > thresholds[0] ? '#F97316' : '#EF4444';
-
   return (
-    <div style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0D1117', color: '#c9d1d9', overflow: 'hidden' }}>
-      
-      {/* Panel Izquierdo: Cámara */}
-      <div style={{ flex: '0 0 60%', position: 'relative', background: '#000' }}>
-        <video style={{ display: 'none' }} playsInline ref={videoElement} />
-        <canvas ref={canvasEl} width={maxVideoWidth} height={maxVideoHeight} style={{ display: 'block', height: '100%', width: '100%', objectFit: 'contain' }} />
-      </div>
-
-      {/* Panel Derecho: Métricas */}
-      <div style={{ flex: '0 0 40%', background: '#161B22', padding: '24px', display: 'flex', flexDirection: 'column', borderLeft: '1px solid #30363D', overflowY: 'auto' }}>
-        <FmaGauge value={metrics.fmaProxy} color={getStatusColor(metrics.fmaProxy)} />
-
-        <SectionTitle title="MÉTRICAS DE MANO (CORE)" />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' }}>
-          <MetricCard name="PINZA ACTIVA" value={metrics.pinchActive} unit="" subtitle="Ref: LM 4-8" color={metrics.pinchActive === 'SÍ' ? '#22C55E' : '#EF4444'} />
-          <MetricCard name="DISTANCIA PINZA" value={metrics.pinchMm} unit="mm" subtitle="Escala 5-17 (80mm)" color="#00D4FF" />
-          <MetricCard name="APERTURA MANO" value={`${metrics.handOpenPct}%`} unit="" subtitle="Normalizado Max Sesión" color={getStatusColor(metrics.handOpenPct)} barProgress={metrics.handOpenPct} />
-          <MetricCard name="DEDOS EXT." value={metrics.fingersExt} unit="/ 5" subtitle="Posición falanges" color="#7C3AED" />
-          <MetricCard name="VELOCIDAD PALMA" value={metrics.palmSpeed} unit="mm/s" subtitle="Media móvil 5 frames" color="#F97316" />
-          <MetricCard name="SUAVIDAD" value={metrics.smoothness} unit="" subtitle="Algoritmo SPARC" color={metrics.smoothness === 'FLUIDO' ? '#22C55E' : '#F97316'} />
-          <MetricCard name="ROM MUÑECA" value={`${metrics.romWrist}°`} unit="" subtitle="Vector 9-0-5" color="#00D4FF" />
-          <MetricCard name="ÍNDICE TEMBLOR" value={metrics.tremor} unit="" subtitle="Desv. Estándar LM0" color={metrics.tremor === 'BAJO' ? '#22C55E' : '#EF4444'} />
-        </div>
-
-        <SectionTitle title="MÉTRICAS CARA Y ATENCIÓN" />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-          <MetricCard name="SIMETRÍA LABIAL" value={metrics.facialSym} unit="pts" subtitle="Ratio L291 vs L61" color={getStatusColor(metrics.facialSym * 100)} />
-          <MetricCard name="SONRISA" value={metrics.smileActive} unit="" subtitle="Dinámica vertical" color={metrics.smileActive === 'SÍ' ? '#22C55E' : '#8B949E'} />
-          <MetricCard name="GAZE HEMI" value={metrics.gazeAsym} unit="" subtitle="Asimetría Atención" color="#7C3AED" />
-          <MetricCard name="ATENCIÓN TAREA" value={`${Math.max(0, metrics.attention)}%`} unit="" subtitle="Fixation in ROI" color={getStatusColor(metrics.attention)} barProgress={metrics.attention} />
-        </div>
-      </div>
-    </div>
+    <GameEngineProvider results={rawResults}>
+      <AppContent 
+        metrics={metrics} 
+        rawResults={rawResults}
+        videoElement={videoElement}
+        canvasEl={canvasEl}
+        maxVideoWidth={maxVideoWidth}
+        maxVideoHeight={maxVideoHeight}
+      />
+    </GameEngineProvider>
   );
 }
 
@@ -222,6 +222,6 @@ const SectionTitle = ({ title }) => (
   <div style={{ color: '#8B949E', fontSize: '0.6rem', fontWeight: 900, letterSpacing: '0.15em', margin: '20px 0 10px 0', borderBottom: '1px solid #30363D', paddingBottom: '4px' }}>
     {title}
   </div>
-)
+);
 
 export default App;
