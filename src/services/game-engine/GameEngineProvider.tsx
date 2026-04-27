@@ -18,6 +18,7 @@ interface GameContextType {
   challengeCompleted: boolean;
   challengeProgress: number;
   challengeInstruction: string;
+  challengeParams: any;
   challengeMetrics: Record<string, any>;
   startChallenge: (type: ChallengeType, params?: any) => void;
   resetGame: () => void;
@@ -75,6 +76,7 @@ export const GameEngineProvider: React.FC<{ children: React.ReactNode, results: 
       challengeCompleted: challenge.completed,
       challengeProgress: challenge.progress,
       challengeInstruction: challenge.instruction,
+      challengeParams: challenge.params,
       challengeMetrics: challenge.metrics,
       startChallenge,
       resetGame
@@ -101,6 +103,7 @@ export const useChallenge = () => {
     challengeCompleted: context.challengeCompleted,
     progress: context.challengeProgress,
     instruction: context.challengeInstruction,
+    params: context.challengeParams,
     metrics: context.challengeMetrics,
     startChallenge: context.startChallenge,
     resetGame: context.resetGame

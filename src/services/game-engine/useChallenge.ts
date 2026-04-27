@@ -5,7 +5,8 @@ export type ChallengeType =
   | 'SHOW_FINGERS' | 'PINCH_TARGET' | 'FIST_HOLD' | 'OPEN_HAND' 
   | 'FINGER_SEQUENCE' | 'OPEN_CLOSE_RHYTHM' | 'SMILE' | 'NEUTRAL_FACE' 
   | 'RAISE_EYEBROWS' | 'FINGER_MATH' | 'FINGER_COUNT_OBJECT' 
-  | 'REACH_AND_PINCH' | 'FINGERS_AND_SMILE';
+  | 'REACH_AND_PINCH' | 'FINGERS_AND_SMILE'
+  | 'MIRROR_FINGERS' | 'ODD_ONE_OUT' | 'DUAL_TASK_BASELINE';
 
 export interface ChallengeResult {
   type: ChallengeType;
@@ -14,6 +15,7 @@ export interface ChallengeResult {
   progress: number;
   instruction: string;
   active: boolean;
+  params: any;
   metrics: {
     finger_individuation?: number;
     pinch_precision?: number;
@@ -25,6 +27,11 @@ export interface ChallengeResult {
     facial_symmetry_index_lower?: number;
     reaction_time_cognitive?: number;
     palm_speed_mean?: number;
+    visuomotor_score?: number;
+    attention_score?: number;
+    dual_task_motor_accuracy?: number;
+    dual_task_interference?: number;
+    samples?: any[];
   };
 }
 
@@ -36,6 +43,7 @@ export const useChallengeEngine = (landmarks: Point[] | null, faceLandmarks: Poi
     progress: 0,
     instruction: '',
     active: false,
+    params: {},
     metrics: {}
   });
 
@@ -73,6 +81,9 @@ export const useChallengeEngine = (landmarks: Point[] | null, faceLandmarks: Poi
       case 'FINGER_COUNT_OBJECT': instruction = `¿Cuántos peces ves?`; break;
       case 'REACH_AND_PINCH': instruction = "Mueve al objetivo y haz pinza"; break;
       case 'FINGERS_AND_SMILE': instruction = `Muestra ${params.count} dedos y sonríe`; break;
+      case 'MIRROR_FINGERS': instruction = "Imita la mano en pantalla"; break;
+      case 'ODD_ONE_OUT': instruction = "Indica cuántos hay del repetido"; break;
+      case 'DUAL_TASK_BASELINE': instruction = `Mantén ${params.count} dedos y resuelve`; break;
     }
 
     setChallenge({
@@ -82,6 +93,7 @@ export const useChallengeEngine = (landmarks: Point[] | null, faceLandmarks: Poi
       progress: 0,
       instruction,
       active: true,
+      params,
       metrics: {}
     });
 
@@ -236,6 +248,84 @@ export const useChallengeEngine = (landmarks: Point[] | null, faceLandmarks: Poi
           }
           currentProgress = ((now - holdStartTime.current) / 1000) * 100;
         } else holdStartTime.current = null;
+        break;
+
+      case 'MIRROR_FINGERS':
+        const targetMirror = (challenge as any).params?.count || 3;
+        if (fingers === targetMirror) {
+          if (!holdStartTime.current) holdStartTime.current = now;
+          if (now - holdStartTime.current > 800) {
+            conditionMet = true;
+            metricsUpdate = { 
+              finger_individuation: fingers,
+              reaction_time_cognitive: now - startTime.current,
+              visuomotor_score: 1.0
+            };
+          }
+          currentProgress = ((now - holdStartTime.current) / 800) * 100;
+        } else holdStartTime.current = null;
+        break;
+
+      case 'ODD_ONE_OUT':
+        if (fingers === 3) { // Respuesta siempre es 3
+          if (!holdStartTime.current) holdStartTime.current = now;
+          if (now - holdStartTime.current > 800) {
+            conditionMet = true;
+            metricsUpdate = { 
+              attention_score: 1.0,
+              reaction_time_cognitive: now - startTime.current,
+              cognitive_motor_score: 1.0
+            };
+          }
+          currentProgress = ((now - holdStartTime.current) / 800) * 100;
+        } else holdStartTime.current = null;
+        break;
+
+      case 'DUAL_TASK_BASELINE':
+        const targetDual = (challenge as any).params?.count || 3;
+        const elapsed = now - startTime.current;
+        currentProgress = (elapsed / 10000) * 100;
+        
+        if (elapsed > 10000) {
+          // Finalizar y calcular métricas agregadas
+          const samples = (challenge.metrics.samples || []);
+          const correctSamples = samples.filter((s: any) => s.motorCorrect).length;
+          const errors = samples.filter((s: any) => s.motorError).length;
+          
+          conditionMet = true;
+          metricsUpdate = {
+            dual_task_motor_accuracy: (correctSamples / (samples.length || 1)) * 100,
+            dual_task_interference: (errors / (samples.length || 1)) * 100,
+            cognitive_motor_score: 0.8 // Score base por completar
+          };
+        } else {
+          // Lógica de muestreo cada 2s para la tarea cognitiva
+          // Esto se gestionará principalmente en el render para las operaciones,
+          // pero aquí guardamos muestras de interferencia.
+          const currentOpIdx = Math.floor((elapsed - 2000) / 2000);
+          if (elapsed > 2000 && elapsed % 2000 < 100) { // Cerca del tick de 2s
+            const samples = challenge.metrics.samples || [];
+            const lastSampleIdx = samples.length - 1;
+            
+            // Si no hemos muestreado esta ventana aún
+            if (lastSampleIdx < currentOpIdx) {
+              const motorCorrect = fingers === targetDual;
+              // Detectar error de interferencia (si cambió los dedos justo ahora)
+              // (Simplificado: si no es correcto es un error de interferencia)
+              const newSample = {
+                timestamp: now,
+                motorCorrect,
+                operationShown: (challenge as any).params?.operations?.[currentOpIdx] || "N/A",
+                fingersDuringOp: fingers,
+                motorError: !motorCorrect
+              };
+              setChallenge(prev => ({
+                ...prev,
+                metrics: { ...prev.metrics, samples: [...(prev.metrics.samples || []), newSample] }
+              }));
+            }
+          }
+        }
         break;
     }
 

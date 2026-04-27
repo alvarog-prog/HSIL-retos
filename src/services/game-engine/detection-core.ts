@@ -23,8 +23,16 @@ export const detectFingerCount = (lm: Point[]) => {
     if (gDist(lm[tip], lm[0]) > gDist(lm[joint], lm[0])) extended++;
   });
   
-  // Thumb (Simplified check against palm base)
-  if (gDist(lm[4], lm[5]) > gDist(lm[3], lm[5])) extended++;
+  // Thumb: OR of three independent checks to cover all palm orientations
+  // A: 3D wrist distance — captures when thumb extends toward/away from camera (Z axis)
+  const d4 = Math.hypot((lm[4].x-lm[0].x)*VW, (lm[4].y-lm[0].y)*VH, ((lm[4].z??0)-(lm[0].z??0))*VW);
+  const d2 = Math.hypot((lm[2].x-lm[0].x)*VW, (lm[2].y-lm[0].y)*VH, ((lm[2].z??0)-(lm[0].z??0))*VW);
+  const thumbA = d4 > d2;
+  // B: index-MCP reference — tip farther from index base than thumb base is (lateral extension)
+  const thumbB = gDist(lm[4], lm[5]) > gDist(lm[2], lm[5]);
+  // C: lenient 2D wrist — same formula but 15% tolerance for borderline palmar poses
+  const thumbC = gDist(lm[4], lm[0]) > gDist(lm[2], lm[0]) * 0.85;
+  if (thumbA || thumbB || thumbC) extended++;
   
   return extended;
 };

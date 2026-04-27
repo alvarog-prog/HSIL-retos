@@ -35,7 +35,11 @@ const SESSION_PHASES: { phase: SessionPhase; duration: number; challenges: Chall
   },
   { 
     phase: 'CHALLENGE', duration: 15000,
-    challenges: ['FINGER_SEQUENCE', 'FINGERS_AND_SMILE', 'FINGER_COUNT_OBJECT', 'FIST_HOLD']
+    challenges: [
+      'FINGER_SEQUENCE', 'OPEN_CLOSE_RHYTHM', 'FINGERS_AND_SMILE',
+      'FINGER_COUNT_OBJECT', 'FIST_HOLD',
+      'MIRROR_FINGERS', 'ODD_ONE_OUT', 'DUAL_TASK_BASELINE'
+    ]
   },
   { 
     phase: 'VISUAL', duration: 10000,
@@ -106,7 +110,20 @@ export const useGameSession = () => {
       let challengeIdx = 0;
       const triggerNext = () => {
         const cType = currentConfig.challenges[challengeIdx % currentConfig.challenges.length];
-        const params = cType === 'FINGER_MATH' ? { operation: '2+1', result: 3 } : { duration: 2000 };
+        let params: any = { duration: 2000 };
+        
+        if (cType === 'FINGER_MATH') params = { operation: '2+1', result: 3 };
+        if (cType === 'MIRROR_FINGERS') params = { count: Math.floor(Math.random() * 5) + 1 };
+        if (cType === 'DUAL_TASK_BASELINE') params = { 
+          count: Math.floor(Math.random() * 3) + 2,
+          operations: ['2+2', '5-1', '3+0', '1+2']
+        };
+        if (cType === 'ODD_ONE_OUT') {
+          const base = [1, 2, 3, 4, 5][Math.floor(Math.random() * 5)];
+          const odd = base + 1;
+          params = { numbers: [base, base, base, odd].sort(() => Math.random() - 0.5) };
+        }
+
         startChallenge(cType, params);
         challengeIdx++;
       };
